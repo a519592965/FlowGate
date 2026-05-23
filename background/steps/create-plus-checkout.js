@@ -34,7 +34,7 @@
   const HOSTED_CHECKOUT_SAMPLE_VERIFICATION_URL = 'https://mail.test.com/api/text-relay/eca_tr_xxxxxxxxx';
   const HOSTED_CHECKOUT_GENERIC_ERROR_PREFIX = 'HOSTED_CHECKOUT_GENERIC_ERROR::';
   const HOSTED_CHECKOUT_VERIFICATION_RESEND_LIMIT_PREFIX = 'HOSTED_CHECKOUT_VERIFICATION_RESEND_LIMIT::';
-  const HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS = 1;
+  const HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS = 3;
   const CHECKOUT_CONVERSION_PROXY_SETTINGS_SCOPE = 'regular';
   const CHECKOUT_CONVERSION_PROXY_BYPASS_LIST = ['<local>', 'localhost', '127.0.0.1'];
   const CHECKOUT_CONVERSION_PROXY_TARGET_HOST_PATTERNS = [
@@ -1339,6 +1339,49 @@ function FindProxyForURL(url, host) {
       return '';
     }
 
+    function extractLooseHostedCheckoutVerificationCode(text = '') {
+      const normalizedText = String(text || '').replace(/\s+/g, ' ').trim();
+      if (!normalizedText) {
+        return '';
+      }
+      const matches = normalizedText.match(/(?:^|[^0-9])(\d{6})(?:[^0-9]|$)/g);
+      if (!matches || matches.length !== 1) {
+        return '';
+      }
+      const codeMatch = matches[0].match(/(\d{6})/);
+      return codeMatch ? codeMatch[1] : '';
+    }
+
+    function parseHostedCheckoutVerificationResponsePayload(text = '', response = null) {
+      const trimmedText = String(text || '').trim();
+      const contentType = String(response?.headers?.get?.('content-type') || '').toLowerCase();
+      if (!trimmedText) {
+        return '';
+      }
+      if (contentType.includes('json') || /^[\[{]/.test(trimmedText)) {
+        try {
+          return JSON.parse(trimmedText);
+        } catch {
+          return trimmedText;
+        }
+      }
+      return trimmedText;
+    }
+
+    async function readHostedCheckoutVerificationCodeResponse(response, verificationUrl = '') {
+      const text = await response.text().catch(() => '');
+      const payload = parseHostedCheckoutVerificationResponsePayload(text, response);
+      const code = extractHostedCheckoutVerificationCode(payload)
+        || extractLooseHostedCheckoutVerificationCode(text);
+      if (!code) {
+        const statusText = [response?.status, response?.statusText].filter(Boolean).join(' ').trim();
+        throw new Error(
+          `hosted checkout 验证码接口暂未返回可用验证码${statusText ? `（${statusText}）` : ''}${verificationUrl ? `：${verificationUrl}` : ''}`
+        );
+      }
+      return code;
+    }
+
     async function fetchHostedCheckoutVerificationCode() {
       const runtimeConfig = await getHostedCheckoutRuntimeConfig({
         ensureCurrentSmsEntry: true,
@@ -1361,29 +1404,7 @@ function FindProxyForURL(url, host) {
           Accept: 'application/json,text/plain,*/*',
         },
       });
-      const text = await response.text().catch(() => '');
-      let payload = text;
-      try {
-        payload = text ? JSON.parse(text) : {};
-      } catch {
-        payload = text;
-      }
-      const code = extractHostedCheckoutVerificationCode(payload);
-      if (!code) {
-        if (runtimeConfig.hostedCheckoutUsesSmsPool && runtimeConfig.hostedCheckoutCurrentSmsEntry) {
-          await updateHostedCheckoutPoolUsage(runtimeConfig.hostedCheckoutCurrentSmsEntry, {
-            success: false,
-            error: 'hosted checkout 验证码接口暂未返回有效验证码。',
-          });
-        }
-        throw new Error('hosted checkout 验证码接口暂未返回有效验证码。');
-      }
-      if (runtimeConfig.hostedCheckoutUsesSmsPool && runtimeConfig.hostedCheckoutCurrentSmsEntry) {
-        await updateHostedCheckoutPoolUsage(runtimeConfig.hostedCheckoutCurrentSmsEntry, {
-          success: true,
-        });
-      }
-      return code;
+      return readHostedCheckoutVerificationCodeResponse(response, verificationUrl);
     }
 
     async function fetchHostedCheckoutVerificationCodeManually(options = {}) {
@@ -1402,17 +1423,7 @@ function FindProxyForURL(url, host) {
             Accept: 'application/json,text/plain,*/*',
           },
         });
-        const text = await response.text().catch(() => '');
-        let payload = text;
-        try {
-          payload = text ? JSON.parse(text) : {};
-        } catch {
-          payload = text;
-        }
-        const code = extractHostedCheckoutVerificationCode(payload);
-        if (!code) {
-          throw new Error('hosted checkout 验证码接口暂未返回有效验证码。');
-        }
+        const code = await readHostedCheckoutVerificationCodeResponse(response, manualVerificationUrl);
         return {
           code,
           verificationUrl: manualVerificationUrl,
@@ -1464,6 +1475,23 @@ function FindProxyForURL(url, host) {
       }
       await addLog(`步骤 6：已检测到 hosted checkout 验证码弹窗，按设置等待 ${delaySeconds} 秒后再获取验证码。`, 'info');
       await sleepWithStop(delaySeconds * 1000);
+    }
+
+    async function rotateHostedCheckoutVerificationSource(reason = '') {
+      const runtimeConfig = await getHostedCheckoutRuntimeConfig({
+        ensureCurrentSmsEntry: true,
+      });
+      if (runtimeConfig.hostedCheckoutUsesSmsPool && runtimeConfig.hostedCheckoutCurrentSmsEntry) {
+        await updateHostedCheckoutPoolUsage(runtimeConfig.hostedCheckoutCurrentSmsEntry, {
+          incrementUseCount: true,
+          success: false,
+          error: String(reason || '').trim(),
+        });
+        await clearHostedCheckoutCurrentSmsEntry();
+      }
+      return getHostedCheckoutRuntimeConfig({
+        ensureCurrentSmsEntry: true,
+      });
     }
 
     async function resendHostedCheckoutVerificationCodeAndRefill(tabId, guestProfile = {}, attempt = 1) {
@@ -1632,6 +1660,39 @@ function FindProxyForURL(url, host) {
       let hostedVerificationResendAttempts = 0;
       let hostedVerificationSubmitted = false;
       let loggedWaitingForHostedVerificationResult = false;
+      let hostedVerificationRecoveryAttempts = 0;
+
+      async function recoverHostedCheckoutVerification(pageState = {}, reason = '') {
+        const normalizedReason = String(reason || '').trim() || '验证码获取或校验失败';
+        await rotateHostedCheckoutVerificationSource(normalizedReason).catch(() => null);
+        await addLog(
+          `步骤 6：PayPal 验证码失败（${hostedVerificationRecoveryAttempts}/${HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS}）：${normalizedReason}。请重新获取验证码；如当前号码不稳定，系统会自动切换号码后继续。`,
+          'warn'
+        );
+        await sleepWithStop(HOSTED_CHECKOUT_VERIFICATION_INVALID_RESEND_DELAY_MS);
+        try {
+          if (pageState?.hostedStage === 'verification' && pageState.verificationInputsVisible) {
+            await runHostedCheckoutPayPalStep(tabId, {
+              resendVerificationCode: true,
+            });
+            await addLog('步骤 6：已重新点击 PayPal 验证码 Resend，准备拉取新的验证码。', 'info');
+          }
+          await waitForHostedCheckoutVerificationPopupDelay();
+          const verificationCode = await pollHostedCheckoutVerificationCode();
+          const verifyResult = await runHostedCheckoutPayPalStep(tabId, {
+            ...guestProfile,
+            verificationCode,
+          });
+          if (verifyResult?.error) {
+            throw new Error(verifyResult.error);
+          }
+          return true;
+        } catch (error) {
+          await addLog(`步骤 6：验证码恢复未成功：${error?.message || error}。`, 'warn');
+          return false;
+        }
+      }
+
       while (Date.now() - startedAt < HOSTED_CHECKOUT_PAYPAL_LOOP_TIMEOUT_MS) {
         throwIfStopped();
         const tab = await chrome?.tabs?.get?.(tabId).catch(() => null);
@@ -1675,14 +1736,16 @@ function FindProxyForURL(url, host) {
           && pageState.verificationInputsVisible
           && pageState.hostedVerificationInvalidCode
         ) {
-          if (hostedVerificationResendAttempts >= HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS) {
-            const error = buildHostedCheckoutVerificationResendLimitError();
-            await addLog(error.message.replace(HOSTED_CHECKOUT_VERIFICATION_RESEND_LIMIT_PREFIX, ''), 'error');
-            throw error;
+          hostedVerificationRecoveryAttempts += 1;
+          const recovered = await recoverHostedCheckoutVerification(
+            pageState,
+            pageState.hostedVerificationErrorText || 'PayPal 验证码输入错误，请重新获取验证码或切换号码后再试。'
+          );
+          if (hostedVerificationRecoveryAttempts >= HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS) {
+            await addLog('步骤 6：验证码已连续失败 3 次，已重新开始当前 PayPal 验证流程。', 'warn');
+            hostedVerificationRecoveryAttempts = 0;
           }
-          hostedVerificationResendAttempts += 1;
-          await resendHostedCheckoutVerificationCodeAndRefill(tabId, guestProfile, hostedVerificationResendAttempts);
-          hostedVerificationSubmitted = true;
+          hostedVerificationSubmitted = recovered;
           loggedWaitingForHostedVerificationResult = false;
           await sleepWithStop(1000);
           continue;
@@ -1697,15 +1760,29 @@ function FindProxyForURL(url, host) {
             await sleepWithStop(1000);
             continue;
           }
-          await addLog('步骤 6：检测到 PayPal hosted checkout 验证码弹窗，正在获取并填写验证码...', 'info');
-          await waitForHostedCheckoutVerificationPopupDelay();
-          const verificationCode = await pollHostedCheckoutVerificationCode();
-          await runHostedCheckoutPayPalStep(tabId, {
-            ...guestProfile,
-            verificationCode,
-          });
-          hostedVerificationSubmitted = true;
-          loggedWaitingForHostedVerificationResult = false;
+          try {
+            await addLog('步骤 6：检测到 PayPal hosted checkout 验证码弹窗，正在获取并填写验证码...', 'info');
+            await waitForHostedCheckoutVerificationPopupDelay();
+            const verificationCode = await pollHostedCheckoutVerificationCode();
+            const verifyResult = await runHostedCheckoutPayPalStep(tabId, {
+              ...guestProfile,
+              verificationCode,
+            });
+            if (verifyResult?.error) {
+              throw new Error(verifyResult.error);
+            }
+            hostedVerificationSubmitted = true;
+            loggedWaitingForHostedVerificationResult = false;
+          } catch (error) {
+            hostedVerificationRecoveryAttempts += 1;
+            await recoverHostedCheckoutVerification(pageState, error?.message || '验证码获取失败');
+            if (hostedVerificationRecoveryAttempts >= HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS) {
+              await addLog('步骤 6：验证码已连续失败 3 次，已重新开始当前 PayPal 验证流程。', 'warn');
+              hostedVerificationRecoveryAttempts = 0;
+            }
+            hostedVerificationSubmitted = false;
+            loggedWaitingForHostedVerificationResult = false;
+          }
           await sleepWithStop(1000);
           continue;
         }
