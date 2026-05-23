@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "FlowGate",
-  "version": "1.0.1",
-  "version_name": "FlowGate 1.0.1",
+  "version": "1.0.3",
+  "version_name": "FlowGate 1.0.3",
   "description": "用于自动执行多步骤 OAuth 注册流程",
   "permissions": [
     "sidePanel",

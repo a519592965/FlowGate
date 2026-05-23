@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>FlowGate 1.0.1</title>
+  <title>FlowGate 1.0.3</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link
@@ -25,7 +25,7 @@
       <div class="header-version-block">
         <div class="header-version-main">
           <button id="extension-update-status" class="header-version-title header-version-link" type="button"
-          aria-label="打开 GitHub Releases 页面" title="打开 GitHub Releases 页面">FlowGate 1.0.1</button>
+          aria-label="打开 GitHub Releases 页面" title="打开 GitHub Releases 页面">FlowGate 1.0.3</button>
           <span id="extension-update-badge" class="header-version-badge" hidden>有新版本</span>
           <button id="btn-release-log" class="header-link-btn" type="button" hidden>更新日志</button>
         </div>
@@ -338,14 +338,14 @@
         <span class="data-label">支付转换代理</span>
         <input type="text" id="input-plus-checkout-conversion-proxy" class="data-input mono"
           placeholder="http://127.0.0.1:7890 或 socks5h://user:pass@host:port"
-          title="仅在第 6 步创建 checkout 并跳转 pay.openai.com / Stripe hosted checkout 时临时生效；留空则沿用当前网络环境" />
+          title="仅在第 6 步支付转换请求期间临时生效；云端转换会把该代理交给云端服务使用，留空则沿用当前转换端网络" />
       </div>
       <div class="data-row" id="row-plus-checkout-conversion-proxy-test" style="display:none;">
         <span class="data-label" aria-hidden="true"></span>
         <div class="data-inline data-value-actions plus-checkout-conversion-proxy-test-inline">
           <button id="btn-plus-checkout-conversion-proxy-test" class="btn btn-outline btn-sm data-inline-btn" type="button">测试代理</button>
           <label class="toggle-switch" for="input-plus-checkout-cloud-conversion-enabled"
-            title="启用后由云端服务接收 accessToken 并生成支付链接；本地支付转换代理将自动停用">
+            title="启用后由云端服务接收 accessToken 并生成支付链接；支付转换代理会随请求交给云端临时使用">
             <input type="checkbox" id="input-plus-checkout-cloud-conversion-enabled" />
             <span class="toggle-switch-track" aria-hidden="true">
               <span class="toggle-switch-thumb"></span>
@@ -359,7 +359,7 @@
         <span class="data-label">流程页面代理</span>
         <div class="data-inline">
           <label class="toggle-switch" for="input-page-scoped-proxy-enabled"
-            title="启用后，除云端支付转换外的流程页面会在当前步骤执行期间临时走该代理">
+            title="启用后，流程页面全程走该代理；仅支付转换请求会临时切换到支付转换代理或云端代理">
             <input type="checkbox" id="input-page-scoped-proxy-enabled" />
             <span class="toggle-switch-track" aria-hidden="true">
               <span class="toggle-switch-thumb"></span>
@@ -367,7 +367,7 @@
           </label>
           <input type="text" id="input-page-scoped-proxy-url" class="data-input mono"
             placeholder="http://127.0.0.1:7890 或 socks5h://user:pass@host:port"
-            title="除第 6 步云端支付转换外，流程页面执行期间临时生效；留空则沿用当前网络环境" />
+            title="流程页面执行期间全程生效；支付转换请求结束后会恢复到该代理；留空则沿用当前网络环境" />
         </div>
       </div>
       <div class="data-row" id="row-page-scoped-proxy-test" style="display:none;">

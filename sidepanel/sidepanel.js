@@ -15653,18 +15653,18 @@ function updatePlusCheckoutConversionModeUi() {
   const cloudRowsVisible = plusModeEnabled && paypalMode && cloudEnabled;
 
   if (typeof inputPlusCheckoutConversionProxy !== 'undefined' && inputPlusCheckoutConversionProxy) {
-    inputPlusCheckoutConversionProxy.disabled = cloudEnabled;
-    inputPlusCheckoutConversionProxy.readOnly = cloudEnabled;
-    inputPlusCheckoutConversionProxy.setAttribute('aria-disabled', cloudEnabled ? 'true' : 'false');
+    inputPlusCheckoutConversionProxy.disabled = false;
+    inputPlusCheckoutConversionProxy.readOnly = false;
+    inputPlusCheckoutConversionProxy.setAttribute('aria-disabled', 'false');
     inputPlusCheckoutConversionProxy.title = cloudEnabled
-      ? '已启用云端支付转换，本地支付转换代理已锁定且不会生效。'
-      : '仅在第 6 步创建 checkout 并跳转 pay.openai.com / Stripe hosted checkout 时临时生效；留空则沿用当前网络环境';
+      ? '启用云端支付转换时，该代理会随请求交给云端服务临时用于创建支付链接；留空则使用云端默认出口。'
+      : '仅在第 6 步支付转换请求期间临时生效；结束后恢复流程页面代理或原网络。';
   }
   if (typeof btnPlusCheckoutConversionProxyTest !== 'undefined' && btnPlusCheckoutConversionProxyTest) {
-    btnPlusCheckoutConversionProxyTest.disabled = cloudEnabled;
-    btnPlusCheckoutConversionProxyTest.setAttribute('aria-disabled', cloudEnabled ? 'true' : 'false');
+    btnPlusCheckoutConversionProxyTest.disabled = false;
+    btnPlusCheckoutConversionProxyTest.setAttribute('aria-disabled', 'false');
     btnPlusCheckoutConversionProxyTest.title = cloudEnabled
-      ? '已启用云端支付转换，本地支付转换代理测试不可用。'
+      ? '测试会在本地浏览器里验证代理连通性；云端转换时会把该地址交给云端服务使用。'
       : '';
   }
   if (typeof rowPlusCheckoutCloudConversionApiUrl !== 'undefined' && rowPlusCheckoutCloudConversionApiUrl) {
@@ -15681,8 +15681,8 @@ function updatePlusCheckoutConversionModeUi() {
   }
 
   if (cloudEnabled) {
-    setPlusCheckoutConversionProxyTestResult('云端模式', {
-      detail: '已启用云端支付转换，本地支付转换代理与代理测试已自动停用。',
+    setPlusCheckoutConversionProxyTestResult('云端可用', {
+      detail: '云端转换会接收并临时使用这里填写的支付转换代理；留空则使用云端默认出口。',
     });
   } else {
     setPlusCheckoutConversionProxyTestResult('未测试');

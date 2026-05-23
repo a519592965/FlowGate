@@ -11684,9 +11684,7 @@ const STEP_FETCH_NETWORK_RETRY_POLICIES = new Map([
 
 const PAGE_SCOPED_PROXY_SETTINGS_SCOPE = 'regular';
 const PAGE_SCOPED_PROXY_BYPASS_LIST = ['<local>', 'localhost', '127.0.0.1'];
-const PAGE_SCOPED_PROXY_EXCLUDED_NODE_IDS = new Set([
-  'plus-checkout-create',
-]);
+const PAGE_SCOPED_PROXY_EXCLUDED_NODE_IDS = new Set();
 let pageScopedProxyDepth = 0;
 let pageScopedProxySnapshot = null;
 let pageScopedProxyFlowDepth = 0;

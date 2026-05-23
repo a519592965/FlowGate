@@ -759,6 +759,21 @@ function FindProxyForURL(url, host) {
       await addLog('步骤 6：支付转换代理已释放，后续步骤恢复原网络/原代理环境。', 'info');
     }
 
+    async function runWithCheckoutConversionProxy(state = {}, paymentMethod = PLUS_PAYMENT_METHOD_PAYPAL, runner = async () => {}) {
+      const snapshot = await maybeApplyCheckoutConversionProxy(state, paymentMethod);
+      try {
+        return await runner();
+      } finally {
+        if (snapshot?.applied) {
+          try {
+            await maybeRestoreCheckoutConversionProxy(snapshot);
+          } catch (restoreError) {
+            await addLog(`姝ラ 6锛氭敮浠樿浆鎹唬鐞嗛噴鏀惧け璐ワ細${restoreError?.message || String(restoreError || '鏈煡閿欒')}`, 'warn');
+          }
+        }
+      }
+    }
+
     function normalizeHostedCheckoutPoolText(value = '') {
       return String(value || '')
         .replace(/\r/g, '')
@@ -2131,6 +2146,7 @@ function FindProxyForURL(url, host) {
       if (apiKey) {
         headers['X-API-Key'] = apiKey;
       }
+      const proxyUrl = normalizeCheckoutConversionProxyUrl(state?.plusCheckoutConversionProxyUrl);
 
       const { response, data } = await fetchJsonWithTimeout(apiUrl, {
         method: 'POST',
@@ -2140,6 +2156,7 @@ function FindProxyForURL(url, host) {
           paymentMethod: normalizePlusPaymentMethod(paymentMethod),
           country: billingDetails.country,
           currency: billingDetails.currency,
+          ...(proxyUrl ? { proxyUrl } : {}),
         }),
       }, 45000);
 
@@ -2317,8 +2334,6 @@ function FindProxyForURL(url, host) {
       await clearHostedCheckoutCurrentSmsEntry();
       let checkoutScopedProxySnapshot = null;
       try {
-        checkoutScopedProxySnapshot = await maybeApplyCheckoutConversionProxy(state, paymentMethod);
-
         const paymentMethodLabel = getPlusPaymentMethodLabel(paymentMethod);
         const checkoutModeLabel = getCheckoutModeLabel(state);
         await addLog(`步骤 6：正在打开新的 ChatGPT 会话，准备创建${checkoutModeLabel}...`, 'info');
@@ -2348,11 +2363,11 @@ function FindProxyForURL(url, host) {
               : `步骤 6：正在由扩展内部创建${checkoutModeLabel}...`,
             'info'
           );
-          result = await sendTabMessageUntilStopped(tabId, PLUS_CHECKOUT_SOURCE, {
+          result = await runWithCheckoutConversionProxy(state, paymentMethod, () => sendTabMessageUntilStopped(tabId, PLUS_CHECKOUT_SOURCE, {
             type: 'CREATE_PLUS_CHECKOUT',
             source: 'background',
             payload: { paymentMethod },
-          });
+          }));
 
           if (result?.error) {
             throw new Error(result.error);
