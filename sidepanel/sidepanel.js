@@ -26,6 +26,7 @@ const btnDeleteSelectedAccountRecords = document.getElementById('btn-delete-sele
 const updateSection = document.getElementById('update-section');
 const btnRepoHome = document.getElementById('btn-repo-home');
 const extensionUpdateStatus = document.getElementById('extension-update-status');
+const extensionUpdateBadge = document.getElementById('extension-update-badge');
 const extensionVersionMeta = document.getElementById('extension-version-meta');
 const btnReleaseLog = document.getElementById('btn-release-log');
 const updateCardVersion = document.getElementById('update-card-version');
@@ -10656,6 +10657,16 @@ function resetUpdateCard() {
   }
 }
 
+function setUpdateBadgeVisible(isVisible, text = '有新版本') {
+  if (!extensionUpdateBadge) {
+    return;
+  }
+  extensionUpdateBadge.hidden = !isVisible;
+  if (isVisible) {
+    extensionUpdateBadge.textContent = text;
+  }
+}
+
 function renderReleaseSnapshot(snapshot) {
   currentReleaseSnapshot = snapshot;
 
@@ -10664,6 +10675,7 @@ function renderReleaseSnapshot(snapshot) {
   }
 
   extensionUpdateStatus.classList.remove('is-update-available', 'is-check-failed', 'is-version-label');
+  setUpdateBadgeVisible(false);
 
   const localVersionText = snapshot?.localVersion || '';
   const logUrl = snapshot?.logUrl || snapshot?.releasesPageUrl || sidepanelUpdateService?.releasesPageUrl || '';
@@ -10677,8 +10689,9 @@ function renderReleaseSnapshot(snapshot) {
 
   switch (snapshot?.status) {
     case 'update-available': {
-      extensionUpdateStatus.textContent = '有更新';
+      extensionUpdateStatus.textContent = localVersionText || 'FlowGate 0.0';
       extensionUpdateStatus.classList.add('is-update-available');
+      setUpdateBadgeVisible(true, '有新版本');
       if (btnReleaseLog) {
         btnReleaseLog.hidden = false;
       }
@@ -10694,6 +10707,10 @@ function renderReleaseSnapshot(snapshot) {
         updateCardSummary.textContent = updateCount > 1
           ? `当前 ${localVersionText}，共有 ${updateCount} 个新版本可更新。`
           : `当前 ${localVersionText}，可更新到 ${snapshot.latestVersion}。`;
+      }
+      if (extensionVersionMeta) {
+        extensionVersionMeta.textContent = `检测到新版本 ${snapshot.latestVersion}，点击标题或“更新日志”查看详情。`;
+        extensionVersionMeta.hidden = false;
       }
       renderUpdateReleaseList(snapshot.newerReleases || []);
       if (btnOpenRelease) {
@@ -10711,6 +10728,7 @@ function renderReleaseSnapshot(snapshot) {
     case 'ignored': {
       extensionUpdateStatus.textContent = localVersionText || 'FlowGate 0.0';
       extensionUpdateStatus.classList.add('is-version-label');
+      setUpdateBadgeVisible(false);
       resetUpdateCard();
       break;
     }
@@ -10718,6 +10736,7 @@ function renderReleaseSnapshot(snapshot) {
     case 'latest': {
       extensionUpdateStatus.textContent = localVersionText || 'FlowGate 0.0';
       extensionUpdateStatus.classList.add('is-version-label');
+      setUpdateBadgeVisible(false);
       resetUpdateCard();
       break;
     }
@@ -10725,6 +10744,7 @@ function renderReleaseSnapshot(snapshot) {
     case 'empty': {
       extensionUpdateStatus.textContent = localVersionText || 'FlowGate 0.0';
       extensionUpdateStatus.classList.add('is-version-label');
+      setUpdateBadgeVisible(false);
       resetUpdateCard();
       break;
     }
@@ -10733,6 +10753,7 @@ function renderReleaseSnapshot(snapshot) {
     default: {
       extensionUpdateStatus.textContent = localVersionText || 'FlowGate 0.0';
       extensionUpdateStatus.classList.add('is-version-label', 'is-check-failed');
+      setUpdateBadgeVisible(false);
       extensionVersionMeta.textContent = snapshot?.errorMessage || 'GitHub Releases 检查失败';
       extensionVersionMeta.hidden = false;
       resetUpdateCard();
@@ -10758,6 +10779,7 @@ async function initializeReleaseInfo() {
   extensionUpdateStatus.textContent = localVersion || 'FlowGate 0.0';
   extensionUpdateStatus.classList.remove('is-update-available', 'is-check-failed');
   extensionUpdateStatus.classList.add('is-version-label');
+  setUpdateBadgeVisible(false);
   extensionVersionMeta.hidden = true;
   extensionVersionMeta.textContent = '';
   if (btnReleaseLog) {

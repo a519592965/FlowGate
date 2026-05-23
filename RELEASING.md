@@ -12,10 +12,10 @@
 
 ## 当前版本
 
-- 当前版本：`v1.0.0`
-- 扩展版本号：`1.0.0`
-- Release 文案：`docs/releases/v1.0.0.md`
-- GitHub Release 正文可直接复制 `docs/releases/v1.0.0.md`
+- 当前版本：`v1.0.1`
+- 扩展版本号：`1.0.1`
+- Release 文案：`docs/releases/v1.0.1.md`
+- GitHub Release 正文可直接复制 `docs/releases/v1.0.1.md`
 
 ## 首次推送
 
@@ -33,11 +33,11 @@ git push -u origin main
 
 ```powershell
 git status
-git add manifest.json sidepanel/sidepanel.html sidepanel/update-service.js sidepanel/sidepanel.js docs/releases/v1.0.0.md RELEASING.md
-git commit -m "Prepare v1.0.0 release"
-git tag -a v1.0.0 -m "FlowGate v1.0.0"
+git add manifest.json sidepanel/sidepanel.html sidepanel/update-service.js sidepanel/sidepanel.js docs/releases/v1.0.1.md RELEASING.md
+git commit -m "Prepare v1.0.1 release"
+git tag -a v1.0.1 -m "FlowGate v1.0.1"
 git push origin main
-git push origin v1.0.0
+git push origin v1.0.1
 ```
 
 ## Release 文案建议
