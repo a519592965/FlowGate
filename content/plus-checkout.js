@@ -217,6 +217,24 @@ function hasHostedOpenAiVerificationPopup() {
   return Boolean(document.getElementById('ci-ciBasic-0'));
 }
 
+function getHostedCheckoutAddressFailureMessage() {
+  const bodyText = normalizeText(document.body?.innerText || '');
+  const patterns = [
+    /customer'?s location isn'?t recognized/i,
+    /set a valid customer address/i,
+    /couldn'?t recognize your location/i,
+    /address.*not.*recognized/i,
+    /location.*not.*recognized/i,
+    /invalid\s+address/i,
+    /tax/i,
+  ];
+  return patterns.some((pattern) => pattern.test(bodyText)) ? bodyText : '';
+}
+
+function hasHostedCheckoutAddressRecognitionError() {
+  return Boolean(getHostedCheckoutAddressFailureMessage());
+}
+
 function fillHostedOpenAiInputById(id, value) {
   const input = document.getElementById(String(id || '').trim());
   if (!input) {
@@ -2010,6 +2028,10 @@ async function fillPlusBillingAddress(payload = {}) {
   const agreementResult = await ensureAgreementCheckbox({
     autoCheckAgreement: payload.autoCheckAgreement ?? seed.autoCheckAgreement,
   });
+  const addressFailureMessage = getHostedCheckoutAddressFailureMessage();
+  if (addressFailureMessage) {
+    throw new Error(`PLUS_CHECKOUT_ADDRESS_RECOGNITION::${addressFailureMessage}`);
+  }
 
   return {
     countryText,
@@ -2105,6 +2127,8 @@ async function inspectPlusCheckoutState(options = {}) {
     readyState: document.readyState,
     hostedOpenAiPage: isHostedOpenAiCheckoutPage(),
     hostedVerificationVisible: hasHostedOpenAiVerificationPopup(),
+    hostedAddressRecognitionError: hasHostedCheckoutAddressRecognitionError(),
+    hostedAddressRecognitionErrorText: getHostedCheckoutAddressFailureMessage(),
     hostedPayPalButtonFound: Boolean(findHostedOpenAiPayPalButton()),
     countryText: readCountryText(),
     hasPayPal: Boolean(findPayPalPaymentMethodTarget()),

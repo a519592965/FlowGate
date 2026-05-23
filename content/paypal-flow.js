@@ -326,7 +326,15 @@ function getHostedVerificationErrorText() {
 }
 
 function hasHostedInvalidVerificationCodeError() {
-  return /check\s+the\s+code\s+and\s+try\s+again/i.test(getHostedVerificationErrorText());
+  const errorText = getHostedVerificationErrorText();
+  return /check\s+the\s+code\s+and\s+try\s+again/i.test(errorText)
+    || /sorry,\s*something\s+went\s+wrong\.?\s*get\s+a\s+new\s+code/i.test(errorText)
+    || /get\s+a\s+new\s+code/i.test(errorText);
+}
+
+function hasHostedVerificationRecoverableError() {
+  return hasHostedInvalidVerificationCodeError()
+    || hasHostedVerificationErrorText();
 }
 
 function findHostedVerificationResendButton() {

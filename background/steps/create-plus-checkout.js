@@ -1569,6 +1569,16 @@ function FindProxyForURL(url, host) {
           throw new Error('步骤 6：hosted checkout 标签页已关闭。');
         }
         const currentUrl = String(tab.url || '').trim();
+        if (/pay\.openai\.com|checkout\.stripe\.com/i.test(currentUrl)) {
+          const state = await sendTabMessageUntilStopped(tabId, PLUS_CHECKOUT_SOURCE, {
+            type: 'PLUS_CHECKOUT_GET_STATE',
+            source: 'background',
+            payload: {},
+          });
+          if (state?.hostedAddressRecognitionError) {
+            throw new Error(`PLUS_CHECKOUT_ADDRESS_RECOGNITION::${state.hostedAddressRecognitionErrorText || 'customer address not recognized'}`);
+          }
+        }
         if (isPayPalUrl(currentUrl) || isPaymentsSuccessUrl(currentUrl)) {
           return {
             transitioned: true,
@@ -1729,6 +1739,22 @@ function FindProxyForURL(url, host) {
         if (pageState.hostedStage === 'generic_error' || pageState.hostedGenericError) {
           await requestHostedCheckoutGenericErrorChoice(tabId, pageState);
           return;
+        }
+
+        if (pageState.hostedAddressRecognitionError) {
+          hostedVerificationRecoveryAttempts += 1;
+          const recoveredAddress = await recoverHostedCheckoutVerification(
+            pageState,
+            pageState.hostedAddressRecognitionErrorText || '客户地址未识别，请更换地址后重试'
+          );
+          if (hostedVerificationRecoveryAttempts >= HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS) {
+            await addLog('步骤 6：地址/验证码已连续失败 3 次，已重新开始当前 PayPal 验证流程。', 'warn');
+            hostedVerificationRecoveryAttempts = 0;
+          }
+          hostedVerificationSubmitted = recoveredAddress;
+          loggedWaitingForHostedVerificationResult = false;
+          await sleepWithStop(1000);
+          continue;
         }
 
         if (
