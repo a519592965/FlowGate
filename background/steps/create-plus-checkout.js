@@ -1376,7 +1376,7 @@ function FindProxyForURL(url, host) {
       if (!code) {
         const statusText = [response?.status, response?.statusText].filter(Boolean).join(' ').trim();
         throw new Error(
-          `hosted checkout 验证码接口暂未返回可用验证码${statusText ? `（${statusText}）` : ''}${verificationUrl ? `：${verificationUrl}` : ''}`
+          `hosted checkout 验证码接口暂未返回有效验证码${statusText ? `（${statusText}）` : ''}${verificationUrl ? `：${verificationUrl}` : ''}`
         );
       }
       return code;
@@ -1429,16 +1429,12 @@ function FindProxyForURL(url, host) {
           verificationUrl: manualVerificationUrl,
         };
       }
-      try {
-        const code = await fetchHostedCheckoutVerificationCode();
-        const runtimeConfig = await getHostedCheckoutRuntimeConfig();
-        return {
-          code,
-          verificationUrl: String(runtimeConfig?.verificationUrl || '').trim(),
-        };
-      } finally {
-        await clearHostedCheckoutCurrentSmsEntry();
-      }
+      const code = await fetchHostedCheckoutVerificationCode();
+      const runtimeConfig = await getHostedCheckoutRuntimeConfig();
+      return {
+        code,
+        verificationUrl: String(runtimeConfig?.verificationUrl || '').trim(),
+      };
     }
 
     async function pollHostedCheckoutVerificationCode() {
@@ -1494,19 +1490,40 @@ function FindProxyForURL(url, host) {
       });
     }
 
-    async function resendHostedCheckoutVerificationCodeAndRefill(tabId, guestProfile = {}, attempt = 1) {
-      await addLog(`步骤 6：PayPal 提示验证码错误，3 秒后自动点击 Resend 重新发送验证码（${attempt}/${HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS}）...`, 'warn');
+    async function resendHostedCheckoutVerificationCodeAndRefill(
+      tabId,
+      guestProfile = {},
+      pageState = {},
+      attempt = 1,
+      reason = ''
+    ) {
+      const normalizedReason = String(reason || '').trim() || '验证码获取或校验失败';
+      await addLog(
+        `步骤 6：PayPal 验证码失败（${attempt}/${HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS}）：${normalizedReason}。将留在当前验证码页重新获取验证码。`,
+        'warn'
+      );
       await sleepWithStop(HOSTED_CHECKOUT_VERIFICATION_INVALID_RESEND_DELAY_MS);
-      await runHostedCheckoutPayPalStep(tabId, {
-        resendVerificationCode: true,
-      });
-      await addLog('步骤 6：已点击 PayPal 验证码 Resend，等待弹窗延迟后重新获取验证码...', 'info');
-      await waitForHostedCheckoutVerificationPopupDelay();
-      const verificationCode = await pollHostedCheckoutVerificationCode();
-      await runHostedCheckoutPayPalStep(tabId, {
-        ...guestProfile,
-        verificationCode,
-      });
+      try {
+        if (pageState?.hostedStage === 'verification' && pageState.verificationInputsVisible) {
+          await runHostedCheckoutPayPalStep(tabId, {
+            resendVerificationCode: true,
+          });
+          await addLog('步骤 6：已在当前验证码页点击 Resend，准备重新获取新的验证码。', 'info');
+        }
+        await waitForHostedCheckoutVerificationPopupDelay();
+        const verificationCode = await pollHostedCheckoutVerificationCode();
+        const verifyResult = await runHostedCheckoutPayPalStep(tabId, {
+          ...guestProfile,
+          verificationCode,
+        });
+        if (verifyResult?.error) {
+          throw new Error(verifyResult.error);
+        }
+        return true;
+      } catch (error) {
+        await addLog(`步骤 6：当前验证码页重试失败：${error?.message || error}。`, 'warn');
+        return false;
+      }
     }
 
     async function requestHostedCheckoutGenericErrorChoice(tabId, pageState = {}) {
@@ -1673,34 +1690,13 @@ function FindProxyForURL(url, host) {
       let hostedVerificationRecoveryAttempts = 0;
 
       async function recoverHostedCheckoutVerification(pageState = {}, reason = '') {
-        const normalizedReason = String(reason || '').trim() || '验证码获取或校验失败';
-        await rotateHostedCheckoutVerificationSource(normalizedReason).catch(() => null);
-        await addLog(
-          `步骤 6：PayPal 验证码失败（${hostedVerificationRecoveryAttempts}/${HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS}）：${normalizedReason}。请重新获取验证码；如当前号码不稳定，系统会自动切换号码后继续。`,
-          'warn'
+        return resendHostedCheckoutVerificationCodeAndRefill(
+          tabId,
+          guestProfile,
+          pageState,
+          hostedVerificationRecoveryAttempts,
+          reason
         );
-        await sleepWithStop(HOSTED_CHECKOUT_VERIFICATION_INVALID_RESEND_DELAY_MS);
-        try {
-          if (pageState?.hostedStage === 'verification' && pageState.verificationInputsVisible) {
-            await runHostedCheckoutPayPalStep(tabId, {
-              resendVerificationCode: true,
-            });
-            await addLog('步骤 6：已重新点击 PayPal 验证码 Resend，准备拉取新的验证码。', 'info');
-          }
-          await waitForHostedCheckoutVerificationPopupDelay();
-          const verificationCode = await pollHostedCheckoutVerificationCode();
-          const verifyResult = await runHostedCheckoutPayPalStep(tabId, {
-            ...guestProfile,
-            verificationCode,
-          });
-          if (verifyResult?.error) {
-            throw new Error(verifyResult.error);
-          }
-          return true;
-        } catch (error) {
-          await addLog(`步骤 6：验证码恢复未成功：${error?.message || error}。`, 'warn');
-          return false;
-        }
       }
 
       while (Date.now() - startedAt < HOSTED_CHECKOUT_PAYPAL_LOOP_TIMEOUT_MS) {
@@ -1747,8 +1743,9 @@ function FindProxyForURL(url, host) {
             pageState,
             pageState.hostedAddressRecognitionErrorText || '客户地址未识别，请更换地址后重试'
           );
-          if (hostedVerificationRecoveryAttempts >= HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS) {
-            await addLog('步骤 6：地址/验证码已连续失败 3 次，已重新开始当前 PayPal 验证流程。', 'warn');
+          if (!recoveredAddress && hostedVerificationRecoveryAttempts >= HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS) {
+            await rotateHostedCheckoutVerificationSource(pageState.hostedAddressRecognitionErrorText || '客户地址未识别，请更换地址后重试').catch(() => null);
+            await addLog('步骤 6：地址/验证码已连续失败 3 次，已切换号码后继续当前 PayPal 验证页。', 'warn');
             hostedVerificationRecoveryAttempts = 0;
           }
           hostedVerificationSubmitted = recoveredAddress;
@@ -1767,8 +1764,9 @@ function FindProxyForURL(url, host) {
             pageState,
             pageState.hostedVerificationErrorText || 'PayPal 验证码输入错误，请重新获取验证码或切换号码后再试。'
           );
-          if (hostedVerificationRecoveryAttempts >= HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS) {
-            await addLog('步骤 6：验证码已连续失败 3 次，已重新开始当前 PayPal 验证流程。', 'warn');
+          if (!recovered && hostedVerificationRecoveryAttempts >= HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS) {
+            await rotateHostedCheckoutVerificationSource(pageState.hostedVerificationErrorText || 'PayPal 验证码输入错误，请重新获取验证码或切换号码后再试。').catch(() => null);
+            await addLog('步骤 6：验证码已连续失败 3 次，已切换号码后继续当前 PayPal 验证页。', 'warn');
             hostedVerificationRecoveryAttempts = 0;
           }
           hostedVerificationSubmitted = recovered;
@@ -1801,12 +1799,13 @@ function FindProxyForURL(url, host) {
             loggedWaitingForHostedVerificationResult = false;
           } catch (error) {
             hostedVerificationRecoveryAttempts += 1;
-            await recoverHostedCheckoutVerification(pageState, error?.message || '验证码获取失败');
-            if (hostedVerificationRecoveryAttempts >= HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS) {
-              await addLog('步骤 6：验证码已连续失败 3 次，已重新开始当前 PayPal 验证流程。', 'warn');
+            const recovered = await recoverHostedCheckoutVerification(pageState, error?.message || '验证码获取失败');
+            if (!recovered && hostedVerificationRecoveryAttempts >= HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS) {
+              await rotateHostedCheckoutVerificationSource(error?.message || '验证码获取失败').catch(() => null);
+              await addLog('步骤 6：验证码已连续失败 3 次，已切换号码后继续当前 PayPal 验证页。', 'warn');
               hostedVerificationRecoveryAttempts = 0;
             }
-            hostedVerificationSubmitted = false;
+            hostedVerificationSubmitted = recovered;
             loggedWaitingForHostedVerificationResult = false;
           }
           await sleepWithStop(1000);
