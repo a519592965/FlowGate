@@ -34,7 +34,10 @@
   const HOSTED_CHECKOUT_SAMPLE_VERIFICATION_URL = 'https://mail.test.com/api/text-relay/eca_tr_xxxxxxxxx';
   const HOSTED_CHECKOUT_GENERIC_ERROR_PREFIX = 'HOSTED_CHECKOUT_GENERIC_ERROR::';
   const HOSTED_CHECKOUT_VERIFICATION_RESEND_LIMIT_PREFIX = 'HOSTED_CHECKOUT_VERIFICATION_RESEND_LIMIT::';
+  const HOSTED_CHECKOUT_CARD_FAILURE_RESTART_PREFIX = 'HOSTED_CHECKOUT_CARD_FAILURE_RESTART::';
+  const HOSTED_CHECKOUT_VERIFICATION_STEP6_RESTART_PREFIX = 'HOSTED_CHECKOUT_VERIFICATION_STEP6_RESTART::';
   const HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS = 3;
+  const HOSTED_CHECKOUT_STEP6_MAX_RESTARTS = 3;
   const CHECKOUT_CONVERSION_PROXY_SETTINGS_SCOPE = 'regular';
   const CHECKOUT_CONVERSION_PROXY_BYPASS_LIST = ['<local>', 'localhost', '127.0.0.1'];
   const CHECKOUT_CONVERSION_PROXY_TARGET_HOST_PATTERNS = [
@@ -1276,7 +1279,7 @@ function FindProxyForURL(url, host) {
     }
 
     function extractHostedCheckoutVerificationCode(payload = {}) {
-      const trustedTextKeyPattern = /^(sms|message|msg|text|content|body|code|otp|verification_code|verificationCode)$/i;
+      const trustedTextKeyPattern = /^(sms|message|msg|text|content|body|data|result|results|payload|value|code|otp|sms_code|smsCode|verification_code|verificationCode)$/i;
       const metadataKeyPattern = /(^|[_-])(phone|mobile|tel|id|order|time|date|expired|expire|status)([_-]|$)/i;
       const contextualCodePattern = /(?:security\s*code|verification\s*code|one[-\s]?time\s*(?:passcode|code)|passcode|otp|code|验证码|安全码)[\s\S]{0,50}?(\d[\s-]?\d[\s-]?\d[\s-]?\d[\s-]?\d[\s-]?\d)|(\d[\s-]?\d[\s-]?\d[\s-]?\d[\s-]?\d[\s-]?\d)[\s\S]{0,50}?(?:security\s*code|verification\s*code|one[-\s]?time\s*(?:passcode|code)|passcode|otp|code|验证码|安全码)/i;
       const exactCodePattern = /^\D*(\d[\s-]?\d[\s-]?\d[\s-]?\d[\s-]?\d[\s-]?\d)\D*$/;
@@ -1437,12 +1440,20 @@ function FindProxyForURL(url, host) {
       };
     }
 
-    async function pollHostedCheckoutVerificationCode() {
+    async function pollHostedCheckoutVerificationCode(options = {}) {
+      const rejectedCodes = new Set(
+        (Array.isArray(options?.rejectCodes) ? options.rejectCodes : [])
+          .map((code) => String(code || '').replace(/\D+/g, '').trim())
+          .filter(Boolean)
+      );
       let lastError = null;
       for (let attempt = 1; attempt <= HOSTED_CHECKOUT_VERIFICATION_POLL_ATTEMPTS; attempt += 1) {
         throwIfStopped();
         try {
           const code = await fetchHostedCheckoutVerificationCode();
+          if (rejectedCodes.has(code)) {
+            throw new Error(`hosted checkout 验证码接口仍返回旧验证码 ${code}，继续等待新验证码`);
+          }
           await addLog(`步骤 6：已获取 hosted checkout 验证码（${attempt}/${HOSTED_CHECKOUT_VERIFICATION_POLL_ATTEMPTS}）。`, 'info');
           return code;
         } catch (error) {
@@ -1495,25 +1506,46 @@ function FindProxyForURL(url, host) {
       guestProfile = {},
       pageState = {},
       attempt = 1,
-      reason = ''
+      reason = '',
+      rejectCodes = []
     ) {
       const normalizedReason = String(reason || '').trim() || '验证码获取或校验失败';
       await addLog(
-        `步骤 6：PayPal 验证码失败（${attempt}/${HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS}）：${normalizedReason}。将留在当前验证码页重新获取验证码。`,
+        `步骤 6：PayPal 验证码失败（${attempt}/${HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS}）：${normalizedReason}。将切换号码并在当前 PayPal 页面重新获取验证码。`,
         'warn'
       );
       await sleepWithStop(HOSTED_CHECKOUT_VERIFICATION_INVALID_RESEND_DELAY_MS);
       try {
-        if (pageState?.hostedStage === 'verification' && pageState.verificationInputsVisible) {
-          await runHostedCheckoutPayPalStep(tabId, {
-            resendVerificationCode: true,
-          });
-          await addLog('步骤 6：已在当前验证码页点击 Resend，准备重新获取新的验证码。', 'info');
+        const nextRuntimeConfig = await rotateHostedCheckoutVerificationSource(normalizedReason);
+        const nextPhone = String(nextRuntimeConfig?.phone || guestProfile.phone || '').trim();
+        if (!nextRuntimeConfig?.hostedCheckoutUsesSmsPool) {
+          await addLog('步骤 6：当前未配置 PayPal 接码池，只能继续使用当前号码/接口重取验证码；建议配置多组“号码----取码链接”以便真正换号。', 'warn');
         }
+        if (nextPhone) {
+          guestProfile.phone = nextPhone;
+        }
+        await addLog(`步骤 6：已切换 PayPal 接码号码为 ${nextPhone || '(空)'}，准备关闭验证码弹窗并重新提交当前 PayPal 页面。`, 'info');
+        if (pageState?.hostedStage === 'verification' && pageState.verificationInputsVisible) {
+          const closeResult = await runHostedCheckoutPayPalStep(tabId, {
+            closeVerificationDialog: true,
+          });
+          if (closeResult?.verificationInputsVisible || closeResult?.verificationClosed === false) {
+            throw new Error('PayPal verification dialog did not close before retrying with a new phone.');
+          }
+          await addLog('步骤 6：已关闭当前验证码弹窗，准备使用新号码重新提交。', 'info');
+        }
+        await runHostedCheckoutPayPalStep(tabId, {
+          ...guestProfile,
+          phone: nextPhone,
+        });
         await waitForHostedCheckoutVerificationPopupDelay();
-        const verificationCode = await pollHostedCheckoutVerificationCode();
+        const verificationCode = await pollHostedCheckoutVerificationCode({ rejectCodes });
+        if (Array.isArray(rejectCodes) && verificationCode) {
+          rejectCodes.push(verificationCode);
+        }
         const verifyResult = await runHostedCheckoutPayPalStep(tabId, {
           ...guestProfile,
+          phone: nextPhone,
           verificationCode,
         });
         if (verifyResult?.error) {
@@ -1521,7 +1553,7 @@ function FindProxyForURL(url, host) {
         }
         return true;
       } catch (error) {
-        await addLog(`步骤 6：当前验证码页重试失败：${error?.message || error}。`, 'warn');
+        await addLog(`步骤 6：当前 PayPal 验证码换号重试失败：${error?.message || error}。`, 'warn');
         return false;
       }
     }
@@ -1557,6 +1589,28 @@ function FindProxyForURL(url, host) {
       return new Error(
         `${HOSTED_CHECKOUT_VERIFICATION_RESEND_LIMIT_PREFIX}PayPal 验证码自动 Resend 重试已达到上限，请尝试在页面手动获取验证码并填入。`
       );
+    }
+
+    async function handleHostedCheckoutCardFailure(tabId, pageState = {}, attempt = 1) {
+      const pageMessage = String(pageState?.hostedCardAddFailureMessage || '').trim()
+        || 'PayPal card add failed.';
+      await addLog(
+        `Step 6: PayPal card failure detected. Closing the current page and restarting step 6. ${pageMessage}`,
+        'warn'
+      );
+      if (chrome?.tabs?.remove) {
+        await chrome.tabs.remove(tabId).catch(() => {});
+      }
+      throw new Error(`${HOSTED_CHECKOUT_CARD_FAILURE_RESTART_PREFIX}${pageMessage}`);
+    }
+
+    async function restartHostedCheckoutStep6(tabId, reason = '') {
+      const message = String(reason || '').trim() || 'PayPal hosted checkout needs a fresh step 6 run.';
+      await addLog(`Step 6: closing current checkout page and restarting step 6. ${message}`, 'warn');
+      if (chrome?.tabs?.remove) {
+        await chrome.tabs.remove(tabId).catch(() => {});
+      }
+      throw new Error(`${HOSTED_CHECKOUT_VERIFICATION_STEP6_RESTART_PREFIX}${message}`);
     }
 
     async function runHostedCheckoutOpenAiFlow(tabId, guestProfile) {
@@ -1595,6 +1649,9 @@ function FindProxyForURL(url, host) {
           if (state?.hostedAddressRecognitionError) {
             throw new Error(`PLUS_CHECKOUT_ADDRESS_RECOGNITION::${state.hostedAddressRecognitionErrorText || 'customer address not recognized'}`);
           }
+          if (state?.hostedMandateFailure) {
+            await restartHostedCheckoutStep6(tabId, state.hostedMandateFailureText || 'PayPal mandate failure requires a new payment method.');
+          }
         }
         if (isPayPalUrl(currentUrl) || isPaymentsSuccessUrl(currentUrl)) {
           return {
@@ -1610,6 +1667,9 @@ function FindProxyForURL(url, host) {
         });
         if (state?.error) {
           throw new Error(state.error);
+        }
+        if (state?.hostedMandateFailure) {
+          await restartHostedCheckoutStep6(tabId, state.hostedMandateFailureText || 'PayPal mandate failure requires a new payment method.');
         }
         if (state?.hostedVerificationVisible && !verificationSubmitted) {
           await addLog('步骤 6：检测到 hosted checkout OpenAI 验证码弹窗，正在获取并填写验证码...', 'info');
@@ -1688,6 +1748,7 @@ function FindProxyForURL(url, host) {
       let hostedVerificationSubmitted = false;
       let loggedWaitingForHostedVerificationResult = false;
       let hostedVerificationRecoveryAttempts = 0;
+      const usedHostedVerificationCodes = [];
 
       async function recoverHostedCheckoutVerification(pageState = {}, reason = '') {
         return resendHostedCheckoutVerificationCodeAndRefill(
@@ -1695,7 +1756,8 @@ function FindProxyForURL(url, host) {
           guestProfile,
           pageState,
           hostedVerificationRecoveryAttempts,
-          reason
+          reason,
+          usedHostedVerificationCodes
         );
       }
 
@@ -1732,6 +1794,9 @@ function FindProxyForURL(url, host) {
         }
 
         const pageState = await getHostedCheckoutPayPalState(tabId);
+        if (pageState.hostedCardAddFailure) {
+          await handleHostedCheckoutCardFailure(tabId, pageState, 1);
+        }
         if (pageState.hostedStage === 'generic_error' || pageState.hostedGenericError) {
           await requestHostedCheckoutGenericErrorChoice(tabId, pageState);
           return;
@@ -1745,8 +1810,7 @@ function FindProxyForURL(url, host) {
           );
           if (!recoveredAddress && hostedVerificationRecoveryAttempts >= HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS) {
             await rotateHostedCheckoutVerificationSource(pageState.hostedAddressRecognitionErrorText || '客户地址未识别，请更换地址后重试').catch(() => null);
-            await addLog('步骤 6：地址/验证码已连续失败 3 次，已切换号码后继续当前 PayPal 验证页。', 'warn');
-            hostedVerificationRecoveryAttempts = 0;
+            await restartHostedCheckoutStep6(tabId, pageState.hostedAddressRecognitionErrorText || 'PayPal address or email failed three times.');
           }
           hostedVerificationSubmitted = recoveredAddress;
           loggedWaitingForHostedVerificationResult = false;
@@ -1766,8 +1830,7 @@ function FindProxyForURL(url, host) {
           );
           if (!recovered && hostedVerificationRecoveryAttempts >= HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS) {
             await rotateHostedCheckoutVerificationSource(pageState.hostedVerificationErrorText || 'PayPal 验证码输入错误，请重新获取验证码或切换号码后再试。').catch(() => null);
-            await addLog('步骤 6：验证码已连续失败 3 次，已切换号码后继续当前 PayPal 验证页。', 'warn');
-            hostedVerificationRecoveryAttempts = 0;
+            await restartHostedCheckoutStep6(tabId, pageState.hostedVerificationErrorText || 'PayPal verification code failed three times.');
           }
           hostedVerificationSubmitted = recovered;
           loggedWaitingForHostedVerificationResult = false;
@@ -1787,7 +1850,8 @@ function FindProxyForURL(url, host) {
           try {
             await addLog('步骤 6：检测到 PayPal hosted checkout 验证码弹窗，正在获取并填写验证码...', 'info');
             await waitForHostedCheckoutVerificationPopupDelay();
-            const verificationCode = await pollHostedCheckoutVerificationCode();
+            const verificationCode = await pollHostedCheckoutVerificationCode({ rejectCodes: usedHostedVerificationCodes });
+            usedHostedVerificationCodes.push(verificationCode);
             const verifyResult = await runHostedCheckoutPayPalStep(tabId, {
               ...guestProfile,
               verificationCode,
@@ -1802,8 +1866,7 @@ function FindProxyForURL(url, host) {
             const recovered = await recoverHostedCheckoutVerification(pageState, error?.message || '验证码获取失败');
             if (!recovered && hostedVerificationRecoveryAttempts >= HOSTED_CHECKOUT_VERIFICATION_RESEND_MAX_ATTEMPTS) {
               await rotateHostedCheckoutVerificationSource(error?.message || '验证码获取失败').catch(() => null);
-              await addLog('步骤 6：验证码已连续失败 3 次，已切换号码后继续当前 PayPal 验证页。', 'warn');
-              hostedVerificationRecoveryAttempts = 0;
+              await restartHostedCheckoutStep6(tabId, error?.message || 'PayPal verification code fetch failed three times.');
             }
             hostedVerificationSubmitted = recovered;
             loggedWaitingForHostedVerificationResult = false;
@@ -1909,13 +1972,53 @@ function FindProxyForURL(url, host) {
       await completeNodeFromBackground('plus-checkout-create', completionPayload);
     }
 
+    async function restartHostedCheckoutCreateStep(reason = '', restartCount = 0) {
+      const nextRestartCount = Math.max(0, Math.floor(Number(restartCount) || 0)) + 1;
+      const message = String(reason || '').trim() || 'PayPal hosted checkout needs a fresh step 6 run.';
+      if (nextRestartCount > HOSTED_CHECKOUT_STEP6_MAX_RESTARTS) {
+        await addLog(
+          `Step 6: restart limit reached (${HOSTED_CHECKOUT_STEP6_MAX_RESTARTS}). ${message}`,
+          'error'
+        );
+        if (typeof failNodeFromBackground === 'function') {
+          await failNodeFromBackground('plus-checkout-create', message);
+        }
+        return;
+      }
+      await addLog(
+        `Step 6: restarting only step 6 (${nextRestartCount}/${HOSTED_CHECKOUT_STEP6_MAX_RESTARTS}). ${message}`,
+        'warn'
+      );
+      const latestState = typeof getState === 'function'
+        ? await getState().catch(() => ({}))
+        : {};
+      await executePlusCheckoutCreate({
+        ...latestState,
+        hostedCheckoutStep6RestartCount: nextRestartCount,
+      });
+    }
+
     function startHostedCheckoutAutomation(tabId, completionPayload = {}) {
       if (!enableHostedCheckoutAutomation) {
         return;
       }
+      let restartedStep6 = false;
       void runHostedCheckoutAutomation(tabId, completionPayload)
         .catch(async (error) => {
           const message = error?.message || String(error || 'hosted checkout automation failed');
+          if (
+            message.startsWith(HOSTED_CHECKOUT_CARD_FAILURE_RESTART_PREFIX)
+            || message.startsWith(HOSTED_CHECKOUT_VERIFICATION_STEP6_RESTART_PREFIX)
+          ) {
+            restartedStep6 = true;
+            await restartHostedCheckoutCreateStep(
+              message
+                .replace(HOSTED_CHECKOUT_CARD_FAILURE_RESTART_PREFIX, '')
+                .replace(HOSTED_CHECKOUT_VERIFICATION_STEP6_RESTART_PREFIX, ''),
+              completionPayload?.hostedCheckoutStep6RestartCount
+            );
+            return;
+          }
           if (isHostedCheckoutNonFreeTrialFailure(error)) {
             const latestState = typeof getState === 'function'
               ? await getState().catch(() => ({}))
@@ -1945,7 +2048,9 @@ function FindProxyForURL(url, host) {
           }
         })
         .finally(async () => {
-          await clearHostedCheckoutCurrentSmsEntry();
+          if (!restartedStep6) {
+            await clearHostedCheckoutCurrentSmsEntry();
+          }
         });
     }
 
@@ -2536,6 +2641,7 @@ function FindProxyForURL(url, host) {
           startHostedCheckoutAutomation(tabId, {
             plusCheckoutCountry: result.country || 'DE',
             plusCheckoutCurrency: result.currency || 'EUR',
+            hostedCheckoutStep6RestartCount: Math.max(0, Math.floor(Number(state?.hostedCheckoutStep6RestartCount) || 0)),
           });
           return;
         }

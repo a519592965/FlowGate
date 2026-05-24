@@ -235,6 +235,21 @@ function hasHostedCheckoutAddressRecognitionError() {
   return Boolean(getHostedCheckoutAddressFailureMessage());
 }
 
+function getHostedCheckoutMandateFailureMessage() {
+  const bodyText = normalizeText(document.body?.innerText || '');
+  const patterns = [
+    /payment\s+method\s+does\s+not\s+allow\s+attaching\s+multiple\s+mandates/i,
+    /set\s+up\s+a\s+new\s+Payment\s+Method\s+to\s+attach\s+a\s+new\s+mandate/i,
+    /multiple\s+mandates/i,
+    /new\s+mandate/i,
+  ];
+  return patterns.some((pattern) => pattern.test(bodyText)) ? bodyText : '';
+}
+
+function hasHostedCheckoutMandateFailure() {
+  return Boolean(getHostedCheckoutMandateFailureMessage());
+}
+
 function fillHostedOpenAiInputById(id, value) {
   const input = document.getElementById(String(id || '').trim());
   if (!input) {
@@ -2129,6 +2144,8 @@ async function inspectPlusCheckoutState(options = {}) {
     hostedVerificationVisible: hasHostedOpenAiVerificationPopup(),
     hostedAddressRecognitionError: hasHostedCheckoutAddressRecognitionError(),
     hostedAddressRecognitionErrorText: getHostedCheckoutAddressFailureMessage(),
+    hostedMandateFailure: hasHostedCheckoutMandateFailure(),
+    hostedMandateFailureText: getHostedCheckoutMandateFailureMessage(),
     hostedPayPalButtonFound: Boolean(findHostedOpenAiPayPalButton()),
     countryText: readCountryText(),
     hasPayPal: Boolean(findPayPalPaymentMethodTarget()),

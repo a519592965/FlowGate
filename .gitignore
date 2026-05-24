@@ -12,6 +12,7 @@
 /docs/新步骤顺序
 __pycache__/
 *.pyc
+*.bak-*
 .worktrees/
 /release-artifacts/
 # Local exported runtime settings

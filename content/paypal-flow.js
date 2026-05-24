@@ -11,6 +11,7 @@ const PAYPAL_HOSTED_STAGE_VERIFICATION = 'verification';
 const PAYPAL_HOSTED_STAGE_REVIEW = 'review_consent';
 const PAYPAL_HOSTED_STAGE_APPROVAL = 'approval';
 const PAYPAL_HOSTED_STAGE_GENERIC_ERROR = 'generic_error';
+const PAYPAL_HOSTED_STAGE_CARD_FAILURE = 'card_failure';
 const PAYPAL_HOSTED_STAGE_UNKNOWN = 'unknown';
 const PAYPAL_HOSTED_HERMES_AUTORUN_SENTINEL = '__MULTIPAGE_PAYPAL_HOSTED_HERMES_AUTORUN__';
 const PAYPAL_HOSTED_GUEST_SUBMIT_SENTINEL = '__MULTIPAGE_PAYPAL_HOSTED_GUEST_SUBMIT__';
@@ -291,9 +292,20 @@ function getPayPalHostedGenericErrorMessage() {
   return match ? match[0] : '';
 }
 
+function getPayPalHostedCardFailureMessage() {
+  const bodyText = normalizeText(document.body?.innerText || '');
+  const match = bodyText.match(
+    /We\s+weren['’]t\s+able\s+to\s+add\s+this\s+card[^.?!]*|We\s+were\s+not\s+able\s+to\s+add\s+this\s+card[^.?!]*|Check\s+all\s+the\s+details\s+are\s+correct\s+and\s+try\s+again[^.?!]*|try\s+a\s+different\s+card[^.?!]*/i
+  );
+  return match ? match[0] : '';
+}
+
 function isPayPalHostedGenericErrorPage() {
   const pathname = getPayPalHostedPathname();
   const bodyText = normalizeText(document.body?.innerText || '');
+  if (hasHostedVerificationInputs() && hasHostedInvalidVerificationCodeError()) {
+    return false;
+  }
   return /\/checkoutweb\/genericError/i.test(pathname)
     || Boolean(getPayPalHostedGenericErrorMessage())
     || (
@@ -304,6 +316,10 @@ function isPayPalHostedGenericErrorPage() {
       /paypal\s+isn[’']?t\s+available\s+at\s+this\s+time/i.test(bodyText)
       && /choose\s+another\s+way\s+to\s+pay/i.test(bodyText)
     );
+}
+
+function isPayPalHostedCardFailurePage() {
+  return Boolean(getPayPalHostedCardFailureMessage());
 }
 
 function isPayPalHostedReviewPage() {
@@ -320,9 +336,21 @@ function hasHostedVerificationInputs() {
 }
 
 function getHostedVerificationErrorText() {
+  const bodyText = normalizeText(document.body?.innerText || '');
   const alert = document.getElementById('message_ciBasic')
-    || getVisibleControls('[role="alert"]').find((node) => /check\s+the\s+code\s+and\s+try\s+again/i.test(normalizeText(node.textContent || '')));
-  return alert && isVisibleElement(alert) ? normalizeText(alert.textContent || '') : '';
+    || getVisibleControls('[role="alert"], [aria-live], [data-testid*="error" i], [class*="error" i]').find((node) => {
+      const text = normalizeText(node.textContent || '');
+      return /check\s+the\s+code\s+and\s+try\s+again/i.test(text)
+        || /sorry,\s*something\s+went\s+wrong\.?\s*get\s+a\s+new\s+code/i.test(text)
+        || /get\s+a\s+new\s+code/i.test(text);
+    });
+  if (alert && isVisibleElement(alert)) {
+    return normalizeText(alert.textContent || '');
+  }
+  const match = bodyText.match(
+    /(?:check\s+the\s+code\s+and\s+try\s+again|sorry,\s*something\s+went\s+wrong\.?\s*get\s+a\s+new\s+code|get\s+a\s+new\s+code)/i
+  );
+  return match ? match[0] : '';
 }
 
 function hasHostedInvalidVerificationCodeError() {
@@ -334,7 +362,7 @@ function hasHostedInvalidVerificationCodeError() {
 
 function hasHostedVerificationRecoverableError() {
   return hasHostedInvalidVerificationCodeError()
-    || hasHostedVerificationErrorText();
+    || Boolean(getHostedVerificationErrorText());
 }
 
 function findHostedVerificationResendButton() {
@@ -346,6 +374,25 @@ function findHostedVerificationResendButton() {
     /resend/i,
     /重新发送|重发/i,
   ]);
+}
+
+function findHostedVerificationCloseButton() {
+  const direct = document.querySelector('button[data-testid="dialog-close"]')
+    || document.querySelector('button[aria-label="Close"]')
+    || document.querySelector('button[aria-label="close"]')
+    || document.querySelector('button[aria-label*="Close" i]');
+  if (direct && isVisibleElement(direct) && isEnabledControl(direct)) {
+    return direct;
+  }
+  const controls = getVisibleControls('button, [role="button"], a');
+  return controls.find((el) => {
+    const text = getActionText(el);
+    const rect = el.getBoundingClientRect();
+    return (/^×$|^x$/i.test(text) || /close|cancel|关闭|取消/i.test(text))
+      && rect.width <= 96
+      && rect.height <= 96
+      && isEnabledControl(el);
+  }) || null;
 }
 
 function findHostedReviewConsentButton() {
@@ -364,11 +411,14 @@ function detectPayPalHostedCheckoutStage() {
   if (!/paypal\./i.test(String(location?.host || ''))) {
     return PAYPAL_HOSTED_STAGE_OUTSIDE;
   }
-  if (isPayPalHostedGenericErrorPage()) {
-    return PAYPAL_HOSTED_STAGE_GENERIC_ERROR;
+  if (isPayPalHostedCardFailurePage()) {
+    return PAYPAL_HOSTED_STAGE_CARD_FAILURE;
   }
   if (hasHostedVerificationInputs()) {
     return PAYPAL_HOSTED_STAGE_VERIFICATION;
+  }
+  if (isPayPalHostedGenericErrorPage()) {
+    return PAYPAL_HOSTED_STAGE_GENERIC_ERROR;
   }
   if (isPayPalHostedAccountCreateEmailPage()) {
     return PAYPAL_HOSTED_STAGE_ACCOUNT_CREATE_EMAIL;
@@ -704,6 +754,43 @@ async function clickHostedVerificationResend() {
   };
 }
 
+async function closeHostedVerificationDialog() {
+  const delayOperation = typeof performPayPalOperationWithDelay === 'function'
+    ? performPayPalOperationWithDelay
+    : async (_metadata, operation) => operation();
+  await waitForDocumentComplete();
+  const button = await waitUntil(() => findHostedVerificationCloseButton(), {
+    intervalMs: 250,
+    timeoutMs: 5000,
+  }).catch(() => null);
+  if (button) {
+    await delayOperation({ stepKey: 'plus-checkout-create', kind: 'click', label: 'hosted-paypal-verification-close' }, async () => {
+      dispatchHostedGenericClick(button);
+    });
+  } else {
+    await delayOperation({ stepKey: 'plus-checkout-create', kind: 'keydown', label: 'hosted-paypal-verification-close-escape' }, async () => {
+      const eventInit = {
+        key: 'Escape',
+        code: 'Escape',
+        keyCode: 27,
+        which: 27,
+        bubbles: true,
+        cancelable: true,
+      };
+      [document.activeElement, document.body, document, window].filter(Boolean).forEach((target) => {
+        target.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+      });
+    });
+  }
+  await sleep(1000);
+  return {
+    stage: detectPayPalHostedCheckoutStage(),
+    closeMethod: button ? 'button' : 'escape',
+    verificationClosed: !hasHostedVerificationInputs(),
+    verificationInputsVisible: hasHostedVerificationInputs(),
+  };
+}
+
 async function fillHostedGuestCheckout(payload = {}) {
   await waitForDocumentComplete();
   startHostedCaptchaCleanupObserver();
@@ -815,6 +902,9 @@ async function runHostedCheckoutStep(payload = {}) {
   }
   const stage = detectPayPalHostedCheckoutStage();
   if (stage === PAYPAL_HOSTED_STAGE_VERIFICATION) {
+    if (payload.closeVerificationDialog) {
+      return closeHostedVerificationDialog();
+    }
     if (payload.resendVerificationCode) {
       return clickHostedVerificationResend();
     }
@@ -1090,6 +1180,8 @@ function inspectPayPalState() {
     hasHostedGuestCheckout: hostedStage === PAYPAL_HOSTED_STAGE_GUEST_CHECKOUT,
     hostedGenericError: hostedStage === PAYPAL_HOSTED_STAGE_GENERIC_ERROR,
     hostedGenericErrorMessage: getPayPalHostedGenericErrorMessage(),
+    hostedCardAddFailure: hostedStage === PAYPAL_HOSTED_STAGE_CARD_FAILURE,
+    hostedCardAddFailureMessage: getPayPalHostedCardFailureMessage(),
     verificationInputsVisible: hasHostedVerificationInputs(),
     hostedVerificationInvalidCode: hasHostedInvalidVerificationCodeError(),
     hostedVerificationErrorText: getHostedVerificationErrorText(),
